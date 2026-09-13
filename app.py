@@ -1,3 +1,4 @@
+
 import hashlib
 import sqlite3
 from datetime import date
@@ -7,9 +8,10 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+# Optional PDF support
 try:
     from reportlab.lib import colors
-    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.styles import getSampleStyleSheet
     from reportlab.platypus import (
         SimpleDocTemplate,
@@ -18,72 +20,74 @@ try:
         Table,
         TableStyle,
     )
-
     REPORTLAB_OK = True
-
 except Exception:
     REPORTLAB_OK = False
 
 
 # ============================================================
-# CONFIGURATION
+# HR WORKFORCE PRO
+# Uses the existing hr_workforce.db schema exactly.
 # ============================================================
 
-DB = Path(__file__).with_name("hr_workforce.db")
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH = BASE_DIR / "hr_workforce.db"
 
 st.set_page_config(
     page_title="HR Workforce Pro",
     page_icon="👥",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 
 # ============================================================
-# CUSTOM CSS
+# UI
 # ============================================================
 
 st.markdown(
     """
     <style>
+        .block-container {
+            padding-top: 1.4rem;
+            padding-bottom: 2rem;
+        }
 
-    .block-container {
-        padding-top: 1.5rem;
-    }
+        .hero {
+            padding: 28px 32px;
+            border-radius: 18px;
+            background: linear-gradient(135deg, #ff7a18, #e52e71);
+            color: white;
+            margin-bottom: 24px;
+        }
 
-    .hero {
-        padding: 26px 30px;
-        border-radius: 18px;
-        background: linear-gradient(
-            135deg,
-            #ff7a18,
-            #e52e71
-        );
-        color: white;
-        margin-bottom: 22px;
-    }
+        .hero-title {
+            font-size: 38px;
+            font-weight: 750;
+            line-height: 1.15;
+            margin-bottom: 8px;
+        }
 
-    .hero strong {
-        display: block;
-        font-size: 38px;
-        line-height: 1.15;
-        margin-bottom: 8px;
-    }
+        .hero-subtitle {
+            font-size: 17px;
+            line-height: 1.5;
+        }
 
-    .hero span {
-        font-size: 17px;
-    }
+        [data-testid="stMetricValue"] {
+            white-space: nowrap !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
+        }
 
-    .small {
-        font-size: 13px;
-        opacity: 0.75;
-    }
+        .status-ok {
+            color: #16803c;
+            font-weight: 700;
+        }
 
-    [data-testid="stMetricValue"] {
-        white-space: nowrap !important;
-        overflow: visible !important;
-        text-overflow: clip !important;
-    }
-
+        .status-bad {
+            color: #c62828;
+            font-weight: 700;
+        }
     </style>
     """,
     unsafe_allow_html=True,
@@ -91,837 +95,313 @@ st.markdown(
 
 
 # ============================================================
-# PASSWORD HASHING
+# DATABASE
 # ============================================================
 
-def hp(password):
+def get_conn():
+    if not DB_PATH.exists():
+        st.error(
+            "Database file 'hr_workforce.db' was not found. "
+            "Upload it to the same GitHub repository as app.py."
+        )
+        st.stop()
 
+    connection = sqlite3.connect(
+        DB_PATH,
+        check_same_thread=False
+    )
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def fetch_df(sql, params=()):
+    connection = get_conn()
+    try:
+        return pd.read_sql_query(sql, connection, params=params)
+    finally:
+        connection.close()
+
+
+def fetch_rows(sql, params=()):
+    connection = get_conn()
+    try:
+        return [dict(row) for row in connection.execute(sql, params).fetchall()]
+    finally:
+        connection.close()
+
+
+def execute(sql, params=()):
+    connection = get_conn()
+    try:
+        cursor = connection.execute(sql, params)
+        connection.commit()
+        return cursor.lastrowid
+    finally:
+        connection.close()
+
+
+# ============================================================
+# PASSWORD
+# ============================================================
+
+def hash_password(password):
     return hashlib.sha256(
-        password.encode()
+        password.encode("utf-8")
     ).hexdigest()
 
 
 # ============================================================
-# DATABASE CONNECTION
+# DATABASE VALIDATION
 # ============================================================
 
-def conn():
-
-    connection = sqlite3.connect(
-        DB,
-        check_same_thread=False
-    )
-
-    connection.row_factory = sqlite3.Row
-
-    return connection
-
-
-# ============================================================
-# DATABASE QUERY HELPER
-# ============================================================
-
-def q(
-    sql,
-    params=(),
-    fetch=False,
-    many=False
-):
-
-    connection = conn()
-
-    cursor = connection.cursor()
-
-    if many:
-
-        cursor.executemany(
-            sql,
-            params
-        )
-
-    else:
-
-        cursor.execute(
-            sql,
-            params
-        )
-
-    output = None
-
-    if fetch:
-
-        output = [
-            dict(row)
-            for row in cursor.fetchall()
-        ]
-
-    connection.commit()
-
-    connection.close()
-
-    return output
-
-
-# ============================================================
-# DATABASE INITIALIZATION
-# ============================================================
-
-def init():
-
-    connection = conn()
-
-    cursor = connection.cursor()
-
-    cursor.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS departments(
-            id INTEGER PRIMARY KEY,
-            name TEXT UNIQUE NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS employees(
-            id INTEGER PRIMARY KEY,
-            code TEXT UNIQUE NOT NULL,
-            name TEXT NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            phone TEXT,
-            dept_id INTEGER,
-            designation TEXT,
-            joining TEXT,
-            status TEXT DEFAULT 'Active',
-            manager TEXT,
-            location TEXT,
-            FOREIGN KEY(dept_id)
-                REFERENCES departments(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS users(
-            id INTEGER PRIMARY KEY,
-            username TEXT UNIQUE,
-            password_hash TEXT NOT NULL,
-            role TEXT NOT NULL,
-            employee_id INTEGER
-        );
-
-        CREATE TABLE IF NOT EXISTS performance(
-            id INTEGER PRIMARY KEY,
-            employee_id INTEGER,
-            period TEXT,
-            target REAL,
-            achieved REAL,
-            rating REAL,
-            comments TEXT,
-            UNIQUE(employee_id, period)
-        );
-
-        CREATE TABLE IF NOT EXISTS attendance(
-            id INTEGER PRIMARY KEY,
-            employee_id INTEGER,
-            day TEXT,
-            status TEXT,
-            notes TEXT,
-            UNIQUE(employee_id, day)
-        );
-
-        CREATE TABLE IF NOT EXISTS goals(
-            id INTEGER PRIMARY KEY,
-            employee_id INTEGER,
-            title TEXT,
-            target REAL,
-            actual REAL,
-            due TEXT,
-            status TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS leave_records(
-            id INTEGER PRIMARY KEY,
-            employee_id INTEGER,
-            type TEXT,
-            start TEXT,
-            end TEXT,
-            days REAL,
-            status TEXT,
-            reason TEXT
-        );
-        """
-    )
-
-
-    # ========================================================
-    # DEPARTMENTS
-    # ========================================================
-
-    departments = [
-        "Engineering",
-        "Sales & Marketing",
-        "Human Resources",
-        "Finance",
-        "Operations",
-        "IT Support",
-    ]
-
-    for department in departments:
-
-        cursor.execute(
-            """
-            INSERT OR IGNORE INTO departments(name)
-            VALUES(?)
-            """,
-            (department,)
-        )
-
-
-    # ========================================================
-    # EMPLOYEES
-    # ========================================================
-
-    employee_count = cursor.execute(
-        "SELECT COUNT(*) FROM employees"
-    ).fetchone()[0]
-
-
-    if employee_count == 0:
-
-        department_map = {
-            row["name"]: row["id"]
-            for row in cursor.execute(
-                """
-                SELECT id,name
-                FROM departments
-                """
-            ).fetchall()
-        }
-
-
-        employee_rows = [
-
-            (
-                "EMP001",
-                "Arun Kumar",
-                "arun@example.com",
-                "9876543210",
-                department_map["Engineering"],
-                "Software Engineer",
-                "2024-04-15",
-                "Active",
-                "Team Lead",
-                "Hyderabad",
-            ),
-
-            (
-                "EMP002",
-                "Priya Sharma",
-                "priya@example.com",
-                "9876543211",
-                department_map["Sales & Marketing"],
-                "Marketing Executive",
-                "2024-06-10",
-                "Active",
-                "Sales Manager",
-                "Bengaluru",
-            ),
-
-            (
-                "EMP003",
-                "Rahul Reddy",
-                "rahul@example.com",
-                "9876543212",
-                department_map["Engineering"],
-                "Python Developer",
-                "2025-01-06",
-                "Active",
-                "Engineering Manager",
-                "Hyderabad",
-            ),
-
-            (
-                "EMP004",
-                "Sneha Rao",
-                "sneha@example.com",
-                "9876543213",
-                department_map["Human Resources"],
-                "HR Executive",
-                "2024-08-19",
-                "Active",
-                "HR Manager",
-                "Vijayawada",
-            ),
-
-            (
-                "EMP005",
-                "Ramu Marketing",
-                "ramu@example.com",
-                "9876543214",
-                department_map["Sales & Marketing"],
-                "Marketing Executive",
-                "2025-03-03",
-                "Active",
-                "Sales Manager",
-                "Vijayawada",
-            ),
-
-            (
-                "EMP006",
-                "Kiran Kumar",
-                "kiran@example.com",
-                "9876543215",
-                department_map["Finance"],
-                "Finance Analyst",
-                "2023-11-20",
-                "Active",
-                "Finance Manager",
-                "Chennai",
-            ),
-
-            (
-                "EMP007",
-                "Anjali Devi",
-                "anjali@example.com",
-                "9876543216",
-                department_map["Operations"],
-                "Operations Executive",
-                "2024-02-12",
-                "Active",
-                "Operations Manager",
-                "Hyderabad",
-            ),
-
-            (
-                "EMP008",
-                "Vikram Singh",
-                "vikram@example.com",
-                "9876543217",
-                department_map["IT Support"],
-                "IT Support Engineer",
-                "2025-05-26",
-                "Active",
-                "IT Manager",
-                "Bengaluru",
-            ),
-        ]
-
-
-        cursor.executemany(
-            """
-            INSERT INTO employees(
-                code,
-                name,
-                email,
-                phone,
-                dept_id,
-                designation,
-                joining,
-                status,
-                manager,
-                location
-            )
-            VALUES(
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                ?
-            )
-            """,
-            employee_rows
-        )
-
-
-    # ========================================================
-    # EMPLOYEE MAP
-    # ========================================================
-
-    employee_map = {
-        row["code"]: row["id"]
-        for row in cursor.execute(
-            """
-            SELECT id,code
-            FROM employees
-            """
-        ).fetchall()
+def validate_database():
+    required = {
+        "departments",
+        "employees",
+        "users",
+        "attendance",
+        "performance",
+        "goals",
+        "leave_records",
     }
 
-
-    # ========================================================
-    # USERS
-    # ========================================================
-
-    users = [
-
-        (
-            "admin",
-            hp("admin@123"),
-            "HR Admin",
-            None,
-        ),
-
-        (
-            "employee",
-            hp("employee@123"),
-            "Employee",
-            employee_map["EMP001"],
-        ),
-    ]
-
-
-    for user in users:
-
-        cursor.execute(
-            """
-            INSERT OR IGNORE INTO users(
-                username,
-                password_hash,
-                role,
-                employee_id
-            )
-            VALUES(
-                ?,
-                ?,
-                ?,
-                ?
-            )
-            """,
-            user
-        )
-
-
-    # ========================================================
-    # PERFORMANCE DEMO DATA
-    # ========================================================
-
-    performance_count = cursor.execute(
-        """
-        SELECT COUNT(*)
-        FROM performance
-        """
-    ).fetchone()[0]
-
-
-    if performance_count == 0:
-
-        performance_values = {
-
-            1: [92, 108, 105],
-
-            2: [115, 130, 126],
-
-            3: [88, 96, 103],
-
-            4: [94, 91, 97],
-
-            5: [72, 81, 76],
-
-            6: [102, 98, 104],
-
-            7: [110, 107, 111],
-
-            8: [95, 99, 101],
+    connection = get_conn()
+    try:
+        actual = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
         }
+    finally:
+        connection.close()
 
+    missing = required - actual
 
-        performance_rows = []
-
-
-        for employee_id, achievements in performance_values.items():
-
-            for index, achieved in enumerate(
-                achievements,
-                start=1
-            ):
-
-                target = (
-                    200
-                    if employee_id == 5
-                    else 100
-                )
-
-
-                rating = (
-                    4.0
-                    if achieved >= 90
-                    else 3.0
-                )
-
-
-                performance_rows.append(
-                    (
-                        employee_id,
-                        f"2026-0{index}",
-                        target,
-                        achieved,
-                        rating,
-                        "Demo performance record",
-                    )
-                )
-
-
-        cursor.executemany(
-            """
-            INSERT INTO performance(
-                employee_id,
-                period,
-                target,
-                achieved,
-                rating,
-                comments
-            )
-            VALUES(
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                ?
-            )
-            """,
-            performance_rows
+    if missing:
+        st.error(
+            "The uploaded hr_workforce.db is missing these tables: "
+            + ", ".join(sorted(missing))
         )
-
-
-    # ========================================================
-    # ATTENDANCE DEMO DATA
-    # ========================================================
-
-    attendance_count = cursor.execute(
-        """
-        SELECT COUNT(*)
-        FROM attendance
-        """
-    ).fetchone()[0]
-
-
-    if attendance_count == 0:
-
-        attendance_rows = []
-
-
-        for employee_id in range(1, 9):
-
-            for day_number in range(1, 11):
-
-                if (
-                    employee_id + day_number
-                ) % 7 == 0:
-
-                    status = "Work From Home"
-
-                else:
-
-                    status = "Present"
-
-
-                attendance_rows.append(
-                    (
-                        employee_id,
-                        f"2026-03-{day_number:02d}",
-                        status,
-                        "Demo record",
-                    )
-                )
-
-
-        cursor.executemany(
-            """
-            INSERT INTO attendance(
-                employee_id,
-                day,
-                status,
-                notes
-            )
-            VALUES(
-                ?,
-                ?,
-                ?,
-                ?
-            )
-            """,
-            attendance_rows
-        )
-
-
-    connection.commit()
-
-    connection.close()
+        st.stop()
 
 
 # ============================================================
-# EMPLOYEE DATAFRAME
+# HERO
 # ============================================================
 
-def edf():
-
-    return pd.read_sql_query(
-        """
-        SELECT
-
-            e.code AS "Employee Code",
-
-            e.name AS "Employee",
-
-            e.email AS "Email",
-
-            e.phone AS "Phone",
-
-            d.name AS "Department",
-
-            e.designation AS "Designation",
-
-            e.joining AS "Joining Date",
-
-            e.status AS "Status",
-
-            e.manager AS "Manager",
-
-            e.location AS "Location"
-
-        FROM employees e
-
-        LEFT JOIN departments d
-            ON e.dept_id = d.id
-
-        ORDER BY e.id
+def hero(title, subtitle):
+    st.markdown(
+        f"""
+        <div class="hero">
+            <div class="hero-title">{title}</div>
+            <div class="hero-subtitle">{subtitle}</div>
+        </div>
         """,
-        conn()
+        unsafe_allow_html=True,
     )
 
 
 # ============================================================
-# PERFORMANCE DATAFRAME
+# DATA
 # ============================================================
 
-def performance():
-
-    return pd.read_sql_query(
+def employees_df():
+    return fetch_df(
         """
         SELECT
-
-            e.code AS "Employee Code",
-
-            e.name AS "Employee",
-
+            e.employee_code AS "Employee Code",
+            e.full_name AS "Employee",
+            e.email AS "Email",
+            e.phone AS "Phone",
             d.name AS "Department",
+            e.designation AS "Designation",
+            e.joining_date AS "Joining Date",
+            e.employment_status AS "Status",
+            e.manager AS "Manager",
+            e.location AS "Location"
+        FROM employees e
+        LEFT JOIN departments d
+            ON e.department_id = d.id
+        ORDER BY e.id
+        """
+    )
 
+
+def performance_df():
+    return fetch_df(
+        """
+        SELECT
+            e.employee_code AS "Employee Code",
+            e.full_name AS "Employee",
+            d.name AS "Department",
             p.period AS "Period",
-
             p.target AS "Target",
-
             p.achieved AS "Achieved",
 
             ROUND(
                 CASE
-                    WHEN p.target > 0
-                    THEN (
-                        p.achieved
-                        * 100.0
-                        / p.target
-                    )
+                    WHEN COALESCE(p.target, 0) > 0
+                    THEN p.achieved * 100.0 / p.target
                     ELSE 0
                 END,
                 2
             ) AS "Achievement %",
 
             CASE
-                WHEN p.achieved >= p.target
+                WHEN COALESCE(p.target, 0) > 0
+                     AND p.achieved >= p.target
                 THEN 'YES'
                 ELSE 'NO'
             END AS "Target Reach",
 
             p.rating AS "Rating",
-
             p.comments AS "Comments"
 
         FROM performance p
-
         JOIN employees e
             ON p.employee_id = e.id
-
         LEFT JOIN departments d
-            ON e.dept_id = d.id
+            ON e.department_id = d.id
 
         ORDER BY
             p.period DESC,
             p.achieved DESC
-        """,
-        conn()
+        """
     )
 
 
-# ============================================================
-# ATTENDANCE DATAFRAME
-# ============================================================
-
-def attendance():
-
-    return pd.read_sql_query(
+def attendance_df():
+    return fetch_df(
         """
         SELECT
-
-            e.code AS "Employee Code",
-
-            e.name AS "Employee",
-
+            e.employee_code AS "Employee Code",
+            e.full_name AS "Employee",
             d.name AS "Department",
-
-            a.day AS "Date",
-
+            a.attendance_date AS "Date",
             a.status AS "Status",
-
             a.notes AS "Notes"
 
         FROM attendance a
-
         JOIN employees e
             ON a.employee_id = e.id
-
         LEFT JOIN departments d
-            ON e.dept_id = d.id
+            ON e.department_id = d.id
 
         ORDER BY
-            a.day DESC
-        """,
-        conn()
+            a.attendance_date DESC
+        """
     )
 
 
-# ============================================================
-# GOALS DATAFRAME
-# ============================================================
-
-def goals():
-
-    return pd.read_sql_query(
+def goals_df():
+    return fetch_df(
         """
         SELECT
-
-            e.code AS "Employee Code",
-
-            e.name AS "Employee",
-
-            g.title AS "Goal",
-
-            g.target AS "Target",
-
-            g.actual AS "Actual",
+            e.employee_code AS "Employee Code",
+            e.full_name AS "Employee",
+            g.goal_title AS "Goal",
+            g.target_value AS "Target",
+            g.actual_value AS "Actual",
 
             ROUND(
                 CASE
-                    WHEN g.target > 0
-                    THEN (
-                        g.actual
-                        * 100.0
-                        / g.target
-                    )
+                    WHEN COALESCE(g.target_value, 0) > 0
+                    THEN g.actual_value * 100.0 / g.target_value
                     ELSE 0
                 END,
                 2
             ) AS "Progress %",
 
-            g.due AS "Due Date",
-
+            g.due_date AS "Due Date",
             g.status AS "Status"
 
         FROM goals g
-
         JOIN employees e
             ON g.employee_id = e.id
 
         ORDER BY
-            g.due
-        """,
-        conn()
+            g.due_date
+        """
+    )
+
+
+def leave_df():
+    return fetch_df(
+        """
+        SELECT
+            e.employee_code AS "Employee Code",
+            e.full_name AS "Employee",
+            l.leave_type AS "Leave Type",
+            l.start_date AS "Start Date",
+            l.end_date AS "End Date",
+            l.days AS "Days",
+            l.status AS "Status",
+            l.reason AS "Reason"
+
+        FROM leave_records l
+        JOIN employees e
+            ON l.employee_id = e.id
+
+        ORDER BY
+            l.start_date DESC
+        """
     )
 
 
 # ============================================================
-# PDF GENERATOR
+# PDF
 # ============================================================
 
-def pdf(title, dataframe):
-
+def create_pdf(title, dataframe):
     if not REPORTLAB_OK:
-
         return None
-
 
     buffer = BytesIO()
 
-
     document = SimpleDocTemplate(
         buffer,
-        pagesize=A4,
-        rightMargin=25,
-        leftMargin=25,
-        topMargin=25,
-        bottomMargin=25,
+        pagesize=landscape(A4),
+        rightMargin=24,
+        leftMargin=24,
+        topMargin=24,
+        bottomMargin=24,
     )
-
 
     styles = getSampleStyleSheet()
 
-
     story = [
-
-        Paragraph(
-            title,
-            styles["Title"]
-        ),
-
-        Spacer(
-            1,
-            10
-        ),
+        Paragraph(title, styles["Title"]),
+        Spacer(1, 12),
     ]
 
+    pdf_df = dataframe.head(100).copy()
 
-    pdf_data = [
-
-        list(dataframe.columns)
-
-    ]
-
-
-    pdf_data.extend(
-
-        dataframe
-        .fillna("")
-        .astype(str)
-        .values
-        .tolist()
-
+    data = [list(pdf_df.columns)]
+    data.extend(
+        pdf_df.fillna("").astype(str).values.tolist()
     )
-
 
     table = Table(
-        pdf_data,
-        repeatRows=1
+        data,
+        repeatRows=1,
     )
-
 
     table.setStyle(
         TableStyle(
             [
-
                 (
                     "BACKGROUND",
                     (0, 0),
                     (-1, 0),
-                    colors.HexColor(
-                        "#243447"
-                    ),
+                    colors.HexColor("#243447"),
                 ),
-
                 (
                     "TEXTCOLOR",
                     (0, 0),
                     (-1, 0),
                     colors.white,
                 ),
-
                 (
                     "GRID",
                     (0, 0),
@@ -929,23 +409,30 @@ def pdf(title, dataframe):
                     0.3,
                     colors.grey,
                 ),
-
+                (
+                    "FONTNAME",
+                    (0, 0),
+                    (-1, 0),
+                    "Helvetica-Bold",
+                ),
                 (
                     "FONTSIZE",
                     (0, 0),
                     (-1, -1),
                     7,
                 ),
+                (
+                    "VALIGN",
+                    (0, 0),
+                    (-1, -1),
+                    "MIDDLE",
+                ),
             ]
         )
     )
 
-
     story.append(table)
-
-
     document.build(story)
-
 
     return buffer.getvalue()
 
@@ -954,232 +441,424 @@ def pdf(title, dataframe):
 # LOGIN
 # ============================================================
 
-def login():
-
-    # FIXED HTML
-    # No visible <h1> / <p> tags.
-
-    st.markdown(
-        """
-        <div class="hero">
-
-            <strong>
-                HR Workforce Pro
-            </strong>
-
-            <span>
-                Employee Management •
-                Performance •
-                Attendance •
-                Goals •
-                HR Analytics
-            </span>
-
-        </div>
-        """,
-        unsafe_allow_html=True
+def login_screen():
+    hero(
+        "HR Workforce Pro",
+        "Employee Management • Performance • Attendance • Goals • HR Analytics",
     )
 
-
-    _, center, _ = st.columns(
-        [1, 1.2, 1]
-    )
-
+    _, center, _ = st.columns([1, 1.15, 1])
 
     with center:
-
-        st.subheader(
-            "🔐 Secure Login"
-        )
-
+        st.subheader("🔐 Secure Login")
 
         username = st.text_input(
-            "Username"
+            "Username",
+            placeholder="Enter username",
         )
-
 
         password = st.text_input(
             "Password",
-            type="password"
+            type="password",
+            placeholder="Enter password",
         )
-
 
         if st.button(
             "Login",
             type="primary",
-            use_container_width=True
+            use_container_width=True,
         ):
-
-            result = q(
+            rows = fetch_rows(
                 """
                 SELECT *
                 FROM users
                 WHERE username = ?
-                AND password_hash = ?
+                  AND password_hash = ?
                 """,
                 (
                     username.strip(),
-                    hp(password)
+                    hash_password(password),
                 ),
-                fetch=True
             )
 
+            if rows:
+                user = rows[0]
 
-            if result:
-
-                st.session_state.update(
-
-                    auth=True,
-
-                    user=result[0]["username"],
-
-                    role=result[0]["role"],
-
-                    eid=result[0]["employee_id"],
-                )
-
+                st.session_state.authenticated = True
+                st.session_state.username = user["username"]
+                st.session_state.role = user["role"]
+                st.session_state.employee_id = user["employee_id"]
 
                 st.rerun()
-
-
             else:
-
-                st.error(
-                    "Invalid username or password."
-                )
-
+                st.error("Invalid username or password.")
 
         st.info(
             """
-            **HR Admin**
+**HR Admin**
+- Username: `admin`
+- Password: `admin@123`
 
-            Username: `admin`
-
-            Password: `admin@123`
-
-            ---
-
-            **Employee**
-
-            Username: `employee`
-
-            Password: `employee@123`
+**Employee**
+- Username: `employee`
+- Password: `employee@123`
             """
         )
 
 
 # ============================================================
-# PERFORMANCE PAGE
+# SIDEBAR
 # ============================================================
 
-def performance_page():
+def sidebar():
+    st.sidebar.title("👥 HR Workforce Pro")
 
-    st.title(
-        "📊 Performance Management"
+    st.sidebar.caption(
+        f"Signed in as **{st.session_state.username}**"
+    )
+
+    st.sidebar.divider()
+
+    if st.sidebar.button(
+        "Logout",
+        use_container_width=True,
+    ):
+        for key in [
+            "authenticated",
+            "username",
+            "role",
+            "employee_id",
+        ]:
+            st.session_state.pop(key, None)
+
+        st.rerun()
+
+
+# ============================================================
+# HR OVERVIEW
+# ============================================================
+
+def hr_overview():
+    hero(
+        "HR Workforce & Performance Management",
+        "Workforce insights, employee performance, attendance, goals and HR analytics.",
+    )
+
+    emp = employees_df()
+    perf = performance_df()
+    att = attendance_df()
+
+    active = int(
+        (emp["Status"].fillna("") == "Active").sum()
+    )
+
+    avg_achievement = (
+        float(perf["Achievement %"].mean())
+        if len(perf)
+        else 0
+    )
+
+    target_reached = int(
+        (perf["Target Reach"] == "YES").sum()
+    )
+
+    attendance_rate = (
+        float(
+            att["Status"]
+            .isin(["Present", "Work From Home"])
+            .mean()
+            * 100
+        )
+        if len(att)
+        else 0
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric("Active Employees", active)
+    c2.metric("Performance Records", len(perf))
+    c3.metric("Avg Achievement", f"{avg_achievement:.1f}%")
+    c4.metric("Attendance Rate", f"{attendance_rate:.1f}%")
+
+    st.subheader("📈 Performance Trend")
+
+    if len(perf):
+        trend = (
+            perf.groupby("Period")["Achievement %"]
+            .mean()
+            .round(2)
+        )
+
+        st.line_chart(trend)
+    else:
+        st.info("No performance records available.")
+
+    st.subheader("🏆 Department Performance")
+
+    if len(perf):
+        summary = (
+            perf.groupby("Department")
+            .agg(
+                Employees=("Employee", "nunique"),
+                Avg_Achievement=("Achievement %", "mean"),
+                Target_Reached=(
+                    "Target Reach",
+                    lambda x: int((x == "YES").sum()),
+                ),
+            )
+            .reset_index()
+        )
+
+        summary["Avg_Achievement"] = summary[
+            "Avg_Achievement"
+        ].round(1)
+
+        summary = summary.rename(
+            columns={
+                "Avg_Achievement": "Avg Achievement %",
+                "Target_Reached": "Target Reached",
+            }
+        )
+
+        st.dataframe(
+            summary,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.caption(
+        f"Target-reached performance records: {target_reached}"
+    )
+
+    st.caption(
+        "This dashboard supports HR review and development; employment decisions should include human review."
     )
 
 
-    dataframe = performance()
+# ============================================================
+# EMPLOYEES
+# ============================================================
 
+def employee_management():
+    st.title("👥 Employee Management")
+
+    df = employees_df()
+
+    search = st.text_input(
+        "🔎 Search employee, code, email or department"
+    )
+
+    if search.strip():
+        search_value = search.strip().lower()
+
+        mask = (
+            df.astype(str)
+            .apply(
+                lambda col: col.str.lower().str.contains(
+                    search_value,
+                    na=False,
+                    regex=False,
+                )
+            )
+            .any(axis=1)
+        )
+
+        df = df[mask]
 
     st.dataframe(
-        dataframe,
+        df,
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
     )
 
+    st.divider()
 
-    employees = q(
+    with st.expander("➕ Add Employee"):
+        departments = fetch_rows(
+            """
+            SELECT id, name
+            FROM departments
+            ORDER BY name
+            """
+        )
+
+        with st.form("add_employee"):
+            c1, c2 = st.columns(2)
+
+            employee_code = c1.text_input("Employee Code")
+            full_name = c2.text_input("Full Name")
+
+            email = c1.text_input("Email")
+            phone = c2.text_input("Phone")
+
+            department_name = c1.selectbox(
+                "Department",
+                [x["name"] for x in departments],
+            )
+
+            designation = c2.text_input("Designation")
+
+            joining_date = c1.date_input(
+                "Joining Date",
+                value=date.today(),
+            )
+
+            manager = c2.text_input("Manager")
+            location = c1.text_input("Location")
+
+            submitted = st.form_submit_button(
+                "Create Employee",
+                type="primary",
+            )
+
+            if submitted:
+                if not employee_code.strip():
+                    st.error("Employee Code is required.")
+                    return
+
+                if not full_name.strip():
+                    st.error("Full Name is required.")
+                    return
+
+                department_id = next(
+                    x["id"]
+                    for x in departments
+                    if x["name"] == department_name
+                )
+
+                try:
+                    execute(
+                        """
+                        INSERT INTO employees(
+                            employee_code,
+                            full_name,
+                            email,
+                            phone,
+                            department_id,
+                            designation,
+                            joining_date,
+                            employment_status,
+                            manager,
+                            location
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            employee_code.strip(),
+                            full_name.strip(),
+                            email.strip(),
+                            phone.strip(),
+                            department_id,
+                            designation.strip(),
+                            joining_date.isoformat(),
+                            "Active",
+                            manager.strip(),
+                            location.strip(),
+                        ),
+                    )
+
+                    st.success("Employee created successfully.")
+                    st.rerun()
+
+                except sqlite3.IntegrityError as error:
+                    st.error(f"Could not create employee: {error}")
+
+
+# ============================================================
+# PERFORMANCE
+# ============================================================
+
+def performance_management():
+    st.title("📊 Performance Management")
+
+    df = performance_df()
+
+    if len(df):
+        c1, c2, c3 = st.columns(3)
+
+        c1.metric("Records", len(df))
+        c2.metric(
+            "Average Achievement",
+            f"{df['Achievement %'].mean():.1f}%"
+        )
+        c3.metric(
+            "Target Reached",
+            int((df["Target Reach"] == "YES").sum())
+        )
+
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.divider()
+    st.subheader("➕ Add / Update Performance")
+
+    employee_list = fetch_rows(
         """
-        SELECT
-            id,
-            code,
-            name
+        SELECT id, employee_code, full_name
         FROM employees
-        ORDER BY name
-        """,
-        fetch=True
+        ORDER BY full_name
+        """
     )
 
-
-    st.subheader(
-        "➕ Add / Update Performance"
-    )
-
-
-    with st.form(
-        "performance_form"
-    ):
-
+    with st.form("performance_form"):
         employee_label = st.selectbox(
             "Employee",
             [
-                f"{x['code']} — {x['name']}"
-                for x in employees
-            ]
+                f"{x['employee_code']} — {x['full_name']}"
+                for x in employee_list
+            ],
         )
 
+        c1, c2, c3 = st.columns(3)
 
-        col1, col2, col3 = st.columns(3)
-
-
-        period = col1.text_input(
+        period = c1.text_input(
             "Period",
-            "2026-04"
+            value="2026-04",
         )
 
-
-        target = col2.number_input(
+        target = c2.number_input(
             "Target",
-            0.0,
-            10000000.0,
-            100.0
+            min_value=0.0,
+            value=100.0,
+            step=10.0,
         )
 
-
-        achieved = col3.number_input(
+        achieved = c3.number_input(
             "Achieved",
-            0.0,
-            10000000.0,
-            0.0
+            min_value=0.0,
+            value=0.0,
+            step=10.0,
         )
-
 
         rating = st.slider(
             "Rating",
-            0.0,
-            5.0,
-            3.0,
-            0.5
+            min_value=0.0,
+            max_value=5.0,
+            value=3.0,
+            step=0.5,
         )
 
+        comments = st.text_area("Comments")
 
-        comments = st.text_area(
-            "Comments"
-        )
-
-
-        if st.form_submit_button(
+        submitted = st.form_submit_button(
             "Save Performance",
-            type="primary"
-        ):
+            type="primary",
+        )
 
-            selected_employee = next(
-
-                employee
-
-                for employee in employees
-
+        if submitted:
+            selected = next(
+                x
+                for x in employee_list
                 if (
-                    f"{employee['code']} — "
-                    f"{employee['name']}"
+                    f"{x['employee_code']} — {x['full_name']}"
+                    == employee_label
                 )
-                == employee_label
-
             )
 
-
-            q(
+            execute(
                 """
                 INSERT INTO performance(
                     employee_id,
@@ -1189,102 +868,67 @@ def performance_page():
                     rating,
                     comments
                 )
-                VALUES(
-                    ?,
-                    ?,
-                    ?,
-                    ?,
-                    ?,
-                    ?
-                )
+                VALUES (?, ?, ?, ?, ?, ?)
 
-                ON CONFLICT(
-                    employee_id,
-                    period
-                )
-
+                ON CONFLICT(employee_id, period)
                 DO UPDATE SET
-
-                    target =
-                        excluded.target,
-
-                    achieved =
-                        excluded.achieved,
-
-                    rating =
-                        excluded.rating,
-
-                    comments =
-                        excluded.comments
+                    target = excluded.target,
+                    achieved = excluded.achieved,
+                    rating = excluded.rating,
+                    comments = excluded.comments
                 """,
                 (
-                    selected_employee["id"],
-                    period,
+                    selected["id"],
+                    period.strip(),
                     target,
                     achieved,
                     rating,
-                    comments,
-                )
+                    comments.strip(),
+                ),
             )
 
-
-            st.success(
-                "Performance saved."
-            )
-
-
+            st.success("Performance saved successfully.")
             st.rerun()
 
 
 # ============================================================
-# ATTENDANCE PAGE
+# ATTENDANCE
 # ============================================================
 
-def attendance_page():
+def attendance_management():
+    st.title("📅 Attendance Management")
 
-    st.title(
-        "📅 Attendance Management"
-    )
-
+    df = attendance_df()
 
     st.dataframe(
-        attendance(),
+        df,
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
     )
 
+    st.divider()
 
-    employees = q(
+    employee_list = fetch_rows(
         """
-        SELECT
-            id,
-            code,
-            name
+        SELECT id, employee_code, full_name
         FROM employees
-        ORDER BY name
-        """,
-        fetch=True
+        ORDER BY full_name
+        """
     )
 
-
-    with st.form(
-        "attendance_form"
-    ):
-
+    with st.form("attendance_form"):
         employee_label = st.selectbox(
             "Employee",
             [
-                f"{x['code']} — {x['name']}"
-                for x in employees
-            ]
+                f"{x['employee_code']} — {x['full_name']}"
+                for x in employee_list
+            ],
         )
-
 
         attendance_date = st.date_input(
             "Date",
-            date.today()
+            value=date.today(),
         )
-
 
         status = st.selectbox(
             "Status",
@@ -1292,154 +936,110 @@ def attendance_page():
                 "Present",
                 "Absent",
                 "Work From Home",
-                "Leave"
-            ]
+                "Leave",
+            ],
         )
 
+        notes = st.text_input("Notes")
 
-        notes = st.text_input(
-            "Notes"
-        )
-
-
-        if st.form_submit_button(
+        submitted = st.form_submit_button(
             "Save Attendance",
-            type="primary"
-        ):
+            type="primary",
+        )
 
-            selected_employee = next(
-
-                employee
-
-                for employee in employees
-
+        if submitted:
+            selected = next(
+                x
+                for x in employee_list
                 if (
-                    f"{employee['code']} — "
-                    f"{employee['name']}"
+                    f"{x['employee_code']} — {x['full_name']}"
+                    == employee_label
                 )
-                == employee_label
-
             )
 
-
-            q(
+            execute(
                 """
                 INSERT INTO attendance(
                     employee_id,
-                    day,
+                    attendance_date,
                     status,
                     notes
                 )
-                VALUES(
-                    ?,
-                    ?,
-                    ?,
-                    ?
-                )
+                VALUES (?, ?, ?, ?)
 
-                ON CONFLICT(
-                    employee_id,
-                    day
-                )
-
+                ON CONFLICT(employee_id, attendance_date)
                 DO UPDATE SET
-
-                    status =
-                        excluded.status,
-
-                    notes =
-                        excluded.notes
+                    status = excluded.status,
+                    notes = excluded.notes
                 """,
                 (
-                    selected_employee["id"],
+                    selected["id"],
                     attendance_date.isoformat(),
                     status,
-                    notes,
-                )
+                    notes.strip(),
+                ),
             )
 
-
-            st.success(
-                "Attendance saved."
-            )
-
-
+            st.success("Attendance saved successfully.")
             st.rerun()
 
 
 # ============================================================
-# GOALS PAGE
+# GOALS
 # ============================================================
 
-def goals_page():
+def goals_management():
+    st.title("🎯 Goals & Target Tracking")
 
-    st.title(
-        "🎯 Goals & Target Tracking"
-    )
-
+    df = goals_df()
 
     st.dataframe(
-        goals(),
+        df,
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
     )
 
+    st.divider()
 
-    employees = q(
+    employee_list = fetch_rows(
         """
-        SELECT
-            id,
-            code,
-            name
+        SELECT id, employee_code, full_name
         FROM employees
-        ORDER BY name
-        """,
-        fetch=True
+        ORDER BY full_name
+        """
     )
 
-
-    with st.form(
-        "goal_form"
-    ):
-
+    with st.form("goal_form"):
         employee_label = st.selectbox(
             "Employee",
             [
-                f"{x['code']} — {x['name']}"
-                for x in employees
-            ]
+                f"{x['employee_code']} — {x['full_name']}"
+                for x in employee_list
+            ],
         )
 
+        goal_title = st.text_input("Goal Title")
 
-        title = st.text_input(
-            "Goal title"
+        c1, c2, c3 = st.columns(3)
+
+        target_value = c1.number_input(
+            "Target Value",
+            min_value=0.0,
+            value=100.0,
+            step=10.0,
         )
 
-
-        col1, col2, col3 = st.columns(3)
-
-
-        target = col1.number_input(
-            "Target value",
-            0.0,
-            10000000.0,
-            100.0
+        actual_value = c2.number_input(
+            "Actual Value",
+            min_value=0.0,
+            value=0.0,
+            step=10.0,
         )
 
-
-        actual = col2.number_input(
-            "Actual value",
-            0.0,
-            10000000.0,
-            0.0
+        due_date = c3.date_input(
+            "Due Date",
+            value=date.today(),
         )
-
-
-        due = col3.date_input(
-            "Due date",
-            date.today()
-        )
-
 
         status = st.selectbox(
             "Status",
@@ -1447,144 +1047,84 @@ def goals_page():
                 "Not Started",
                 "In Progress",
                 "Completed",
-                "On Hold"
-            ]
+                "On Hold",
+            ],
         )
 
-
-        if st.form_submit_button(
+        submitted = st.form_submit_button(
             "Create Goal",
-            type="primary"
-        ):
+            type="primary",
+        )
 
-            selected_employee = next(
-
-                employee
-
-                for employee in employees
-
+        if submitted:
+            selected = next(
+                x
+                for x in employee_list
                 if (
-                    f"{employee['code']} — "
-                    f"{employee['name']}"
+                    f"{x['employee_code']} — {x['full_name']}"
+                    == employee_label
                 )
-                == employee_label
-
             )
 
-
-            q(
+            execute(
                 """
                 INSERT INTO goals(
                     employee_id,
-                    title,
-                    target,
-                    actual,
-                    due,
+                    goal_title,
+                    target_value,
+                    actual_value,
+                    due_date,
                     status
                 )
-                VALUES(
-                    ?,
-                    ?,
-                    ?,
-                    ?,
-                    ?,
-                    ?
-                )
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    selected_employee["id"],
-                    title,
-                    target,
-                    actual,
-                    due.isoformat(),
+                    selected["id"],
+                    goal_title.strip(),
+                    target_value,
+                    actual_value,
+                    due_date.isoformat(),
                     status,
-                )
+                ),
             )
 
-
-            st.success(
-                "Goal created."
-            )
-
-
+            st.success("Goal created successfully.")
             st.rerun()
 
 
 # ============================================================
-# LEAVE PAGE
+# LEAVE
 # ============================================================
 
-def leave_page():
+def leave_management():
+    st.title("📝 Leave Records")
 
-    st.title(
-        "📝 Leave Records"
-    )
-
-
-    dataframe = pd.read_sql_query(
-        """
-        SELECT
-
-            e.code AS "Employee Code",
-
-            e.name AS "Employee",
-
-            l.type AS "Leave Type",
-
-            l.start AS "Start",
-
-            l.end AS "End",
-
-            l.days AS "Days",
-
-            l.status AS "Status",
-
-            l.reason AS "Reason"
-
-        FROM leave_records l
-
-        JOIN employees e
-            ON l.employee_id = e.id
-
-        ORDER BY
-            l.start DESC
-        """,
-        conn()
-    )
-
+    df = leave_df()
 
     st.dataframe(
-        dataframe,
+        df,
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
     )
 
+    st.divider()
 
-    employees = q(
+    employee_list = fetch_rows(
         """
-        SELECT
-            id,
-            code,
-            name
+        SELECT id, employee_code, full_name
         FROM employees
-        ORDER BY name
-        """,
-        fetch=True
+        ORDER BY full_name
+        """
     )
 
-
-    with st.form(
-        "leave_form"
-    ):
-
+    with st.form("leave_form"):
         employee_label = st.selectbox(
             "Employee",
             [
-                f"{x['code']} — {x['name']}"
-                for x in employees
-            ]
+                f"{x['employee_code']} — {x['full_name']}"
+                for x in employee_list
+            ],
         )
-
 
         leave_type = st.selectbox(
             "Leave Type",
@@ -1593,103 +1133,70 @@ def leave_page():
                 "Sick Leave",
                 "Earned Leave",
                 "Work From Home",
-                "Other"
-            ]
+                "Other",
+            ],
         )
 
+        c1, c2 = st.columns(2)
 
-        col1, col2 = st.columns(2)
-
-
-        start = col1.date_input(
-            "Start",
-            date.today()
+        start_date = c1.date_input(
+            "Start Date",
+            value=date.today(),
         )
 
-
-        end = col2.date_input(
-            "End",
-            date.today()
+        end_date = c2.date_input(
+            "End Date",
+            value=date.today(),
         )
 
+        reason = st.text_area("Reason")
 
-        reason = st.text_area(
-            "Reason"
-        )
-
-
-        if st.form_submit_button(
+        submitted = st.form_submit_button(
             "Submit Leave",
-            type="primary"
-        ):
+            type="primary",
+        )
 
-            if end < start:
-
-                st.error(
-                    "End date cannot be before start date."
-                )
-
+        if submitted:
+            if end_date < start_date:
+                st.error("End Date cannot be before Start Date.")
                 return
 
-
-            selected_employee = next(
-
-                employee
-
-                for employee in employees
-
+            selected = next(
+                x
+                for x in employee_list
                 if (
-                    f"{employee['code']} — "
-                    f"{employee['name']}"
+                    f"{x['employee_code']} — {x['full_name']}"
+                    == employee_label
                 )
-                == employee_label
-
             )
 
+            days = (end_date - start_date).days + 1
 
-            days = (
-                end - start
-            ).days + 1
-
-
-            q(
+            execute(
                 """
                 INSERT INTO leave_records(
                     employee_id,
-                    type,
-                    start,
-                    end,
+                    leave_type,
+                    start_date,
+                    end_date,
                     days,
                     status,
                     reason
                 )
-                VALUES(
-                    ?,
-                    ?,
-                    ?,
-                    ?,
-                    ?,
-                    ?,
-                    ?
-                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    selected_employee["id"],
+                    selected["id"],
                     leave_type,
-                    start.isoformat(),
-                    end.isoformat(),
+                    start_date.isoformat(),
+                    end_date.isoformat(),
                     days,
                     "Pending",
-                    reason,
-                )
+                    reason.strip(),
+                ),
             )
 
-
-            st.success(
-                "Leave submitted."
-            )
-
-
+            st.success("Leave submitted successfully.")
             st.rerun()
 
 
@@ -1698,726 +1205,277 @@ def leave_page():
 # ============================================================
 
 def reports():
+    st.title("📄 HR Reports")
 
-    st.title(
-        "📄 HR Reports"
-    )
-
-
-    report_options = {
-
-        "Employee Directory":
-            edf(),
-
-        "Performance Report":
-            performance(),
-
-        "Attendance Report":
-            attendance(),
-
-        "Goals Report":
-            goals(),
+    reports_map = {
+        "Employee Directory": employees_df(),
+        "Performance Report": performance_df(),
+        "Attendance Report": attendance_df(),
+        "Goals Report": goals_df(),
+        "Leave Report": leave_df(),
     }
 
-
-    report_name = st.selectbox(
-        "Report",
-        list(report_options.keys())
+    selected_report = st.selectbox(
+        "Select Report",
+        list(reports_map.keys()),
     )
 
-
-    dataframe = report_options[
-        report_name
-    ]
-
+    df = reports_map[selected_report]
 
     st.dataframe(
-        dataframe,
+        df,
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
     )
 
-
-    csv_data = dataframe.to_csv(
+    csv_data = df.to_csv(
         index=False
-    ).encode()
+    ).encode("utf-8")
 
+    filename = (
+        selected_report
+        .lower()
+        .replace(" ", "_")
+        + ".csv"
+    )
 
     st.download_button(
         "⬇️ Download CSV",
         csv_data,
-        report_name
-        .lower()
-        .replace(" ", "_")
-        + ".csv",
-        "text/csv"
+        file_name=filename,
+        mime="text/csv",
     )
 
-
     if REPORTLAB_OK:
-
-        pdf_data = pdf(
-            report_name,
-            dataframe
+        pdf_data = create_pdf(
+            selected_report,
+            df,
         )
-
 
         st.download_button(
             "📄 Download PDF",
             pdf_data,
-            report_name
-            .lower()
-            .replace(" ", "_")
-            + ".pdf",
-            "application/pdf"
+            file_name=filename.replace(
+                ".csv",
+                ".pdf",
+            ),
+            mime="application/pdf",
+        )
+    else:
+        st.warning(
+            "PDF support is unavailable because ReportLab is not installed."
         )
 
 
 # ============================================================
-# HR OVERVIEW
+# EMPLOYEE SELF SERVICE
 # ============================================================
 
-def overview():
+def employee_self_service():
+    employee_id = st.session_state.employee_id
 
-    employees = edf()
-
-    performance_data = performance()
-
-    attendance_data = attendance()
-
-
-    st.markdown(
-        """
-        <div class="hero">
-
-            <strong>
-                HR Workforce &amp;
-                Performance Management
-            </strong>
-
-            <span>
-                Workforce insights for HR review,
-                development and operational visibility.
-            </span>
-
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-
-    active_employees = int(
-        (
-            employees["Status"]
-            == "Active"
-        ).sum()
-    )
-
-
-    average_achievement = (
-        performance_data[
-            "Achievement %"
-        ].mean()
-        if len(performance_data)
-        else 0
-    )
-
-
-    attendance_rate = (
-        attendance_data[
-            "Status"
-        ]
-        .isin(
-            [
-                "Present",
-                "Work From Home"
-            ]
-        )
-        .mean()
-        * 100
-        if len(attendance_data)
-        else 0
-    )
-
-
-    col1, col2, col3, col4 = st.columns(4)
-
-
-    col1.metric(
-        "Active Employees",
-        active_employees
-    )
-
-
-    col2.metric(
-        "Performance Records",
-        len(performance_data)
-    )
-
-
-    col3.metric(
-        "Avg Achievement",
-        f"{average_achievement:.1f}%"
-    )
-
-
-    col4.metric(
-        "Attendance Rate",
-        f"{attendance_rate:.1f}%"
-    )
-
-
-    st.subheader(
-        "📈 Performance Trend"
-    )
-
-
-    if len(performance_data):
-
-        trend = (
-            performance_data
-            .groupby("Period")[
-                "Achievement %"
-            ]
-            .mean()
-        )
-
-
-        st.line_chart(
-            trend
-        )
-
-
-    st.subheader(
-        "🏆 Department Snapshot"
-    )
-
-
-    if len(performance_data):
-
-        department_summary = (
-
-            performance_data
-
-            .groupby("Department")
-
-            .agg(
-
-                Employees=(
-                    "Employee",
-                    "nunique"
-                ),
-
-                Avg_Achievement=(
-                    "Achievement %",
-                    "mean"
-                ),
-
-                Target_Reached=(
-                    "Target Reach",
-                    lambda x:
-                    (x == "YES").sum()
-                ),
-            )
-
-            .reset_index()
-
-        )
-
-
-        department_summary[
-            "Avg_Achievement"
-        ] = department_summary[
-            "Avg_Achievement"
-        ].round(1)
-
-
-        st.dataframe(
-            department_summary,
-            use_container_width=True,
-            hide_index=True
-        )
-
-
-    st.caption(
-        "This application is decision-support software; "
-        "HR should use human review for employment decisions."
-    )
-
-
-# ============================================================
-# EMPLOYEE MANAGEMENT
-# ============================================================
-
-def employees():
-
-    st.title(
-        "👥 Employee Management"
-    )
-
-
-    dataframe = edf()
-
-
-    st.dataframe(
-        dataframe,
-        use_container_width=True,
-        hide_index=True
-    )
-
-
-    with st.expander(
-        "➕ Add Employee"
-    ):
-
-        departments = q(
-            """
-            SELECT *
-            FROM departments
-            ORDER BY name
-            """,
-            fetch=True
-        )
-
-
-        with st.form(
-            "add_employee"
-        ):
-
-            col1, col2 = st.columns(2)
-
-
-            code = col1.text_input(
-                "Employee Code"
-            )
-
-
-            name = col2.text_input(
-                "Full Name"
-            )
-
-
-            email = col1.text_input(
-                "Email"
-            )
-
-
-            phone = col2.text_input(
-                "Phone"
-            )
-
-
-            department = col1.selectbox(
-                "Department",
-                [
-                    item["name"]
-                    for item in departments
-                ]
-            )
-
-
-            designation = col2.text_input(
-                "Designation"
-            )
-
-
-            joining = col1.date_input(
-                "Joining Date",
-                date.today()
-            )
-
-
-            manager = col2.text_input(
-                "Manager"
-            )
-
-
-            location = col1.text_input(
-                "Location"
-            )
-
-
-            submitted = st.form_submit_button(
-                "Create Employee",
-                type="primary"
-            )
-
-
-            if submitted:
-
-                try:
-
-                    department_id = next(
-
-                        item["id"]
-
-                        for item in departments
-
-                        if item["name"]
-                        == department
-
-                    )
-
-
-                    q(
-                        """
-                        INSERT INTO employees(
-                            code,
-                            name,
-                            email,
-                            phone,
-                            dept_id,
-                            designation,
-                            joining,
-                            manager,
-                            location
-                        )
-                        VALUES(
-                            ?,
-                            ?,
-                            ?,
-                            ?,
-                            ?,
-                            ?,
-                            ?,
-                            ?,
-                            ?
-                        )
-                        """,
-                        (
-                            code,
-                            name,
-                            email,
-                            phone,
-                            department_id,
-                            designation,
-                            joining.isoformat(),
-                            manager,
-                            location,
-                        )
-                    )
-
-
-                    st.success(
-                        "Employee created."
-                    )
-
-
-                    st.rerun()
-
-
-                except Exception as error:
-
-                    st.error(
-                        str(error)
-                    )
-
-
-# ============================================================
-# EMPLOYEE DASHBOARD
-# ============================================================
-
-def employee_view():
-
-    employee_id = (
-        st.session_state.eid
-    )
-
-
-    employee = q(
+    employee_rows = fetch_rows(
         """
         SELECT
-
             e.*,
-
-            d.name AS dept
-
+            d.name AS department
         FROM employees e
-
         LEFT JOIN departments d
-            ON e.dept_id = d.id
-
+            ON e.department_id = d.id
         WHERE e.id = ?
         """,
         (employee_id,),
-        fetch=True
-    )[0]
+    )
 
+    if not employee_rows:
+        st.error("Employee profile not found.")
+        return
 
-    performance_data = performance()
+    employee = employee_rows[0]
 
+    perf = performance_df()
+    att = attendance_df()
+    goals = goals_df()
 
-    performance_data = performance_data[
-        performance_data[
-            "Employee Code"
-        ]
-        == employee["code"]
+    perf = perf[
+        perf["Employee Code"]
+        == employee["employee_code"]
     ]
 
-
-    attendance_data = attendance()
-
-
-    attendance_data = attendance_data[
-        attendance_data[
-            "Employee Code"
-        ]
-        == employee["code"]
+    att = att[
+        att["Employee Code"]
+        == employee["employee_code"]
     ]
 
+    goals = goals[
+        goals["Employee Code"]
+        == employee["employee_code"]
+    ]
 
-    st.markdown(
-        f"""
-        <div class="hero">
-
-            <strong>
-                Welcome, {employee["name"]}
-            </strong>
-
-            <span>
-                {employee["designation"]}
-                •
-                {employee["dept"]}
-            </span>
-
-        </div>
-        """,
-        unsafe_allow_html=True
+    page = st.sidebar.radio(
+        "Navigation",
+        [
+            "🏠 My Overview",
+            "📊 My Performance",
+            "📅 My Attendance",
+            "🎯 My Goals",
+            "📄 My Report",
+        ],
     )
 
-
-    col1, col2, col3 = st.columns(3)
-
-
-    col1.metric(
-        "Performance Records",
-        len(performance_data)
+    hero(
+        f"Welcome, {employee['full_name']}",
+        f"{employee['designation']} • {employee['department']} • {employee['location']}",
     )
 
+    if page == "🏠 My Overview":
+        c1, c2, c3 = st.columns(3)
 
-    col2.metric(
-        "Avg Achievement",
-        (
-            f"{performance_data['Achievement %'].mean():.1f}%"
-            if len(performance_data)
-            else "0%"
+        c1.metric(
+            "Performance Records",
+            len(perf),
         )
-    )
 
-
-    col3.metric(
-        "Attendance Rate",
-        (
-            f"{attendance_data.Status.isin(['Present','Work From Home']).mean()*100:.1f}%"
-            if len(attendance_data)
-            else "0%"
+        c2.metric(
+            "Avg Achievement",
+            (
+                f"{perf['Achievement %'].mean():.1f}%"
+                if len(perf)
+                else "0%"
+            ),
         )
-    )
 
+        c3.metric(
+            "Attendance Rate",
+            (
+                f"{att['Status'].isin(['Present', 'Work From Home']).mean() * 100:.1f}%"
+                if len(att)
+                else "0%"
+            ),
+        )
 
-    st.dataframe(
-        performance_data,
-        use_container_width=True,
-        hide_index=True
-    )
+        st.subheader("📊 My Performance")
+
+        st.dataframe(
+            perf,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    elif page == "📊 My Performance":
+        st.subheader("📊 My Performance")
+
+        st.dataframe(
+            perf,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        if len(perf):
+            st.line_chart(
+                perf.set_index("Period")["Achievement %"]
+            )
+
+    elif page == "📅 My Attendance":
+        st.subheader("📅 My Attendance")
+
+        st.dataframe(
+            att,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    elif page == "🎯 My Goals":
+        st.subheader("🎯 My Goals")
+
+        st.dataframe(
+            goals,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    elif page == "📄 My Report":
+        st.subheader("📄 My Performance Report")
+
+        st.dataframe(
+            perf,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        if REPORTLAB_OK:
+            pdf_data = create_pdf(
+                "Employee Performance Report",
+                perf,
+            )
+
+            st.download_button(
+                "📄 Download My PDF",
+                pdf_data,
+                file_name=(
+                    f"{employee['employee_code']}_performance_report.pdf"
+                ),
+                mime="application/pdf",
+            )
 
 
 # ============================================================
-# MAIN APPLICATION
+# ADMIN
+# ============================================================
+
+def admin_dashboard():
+    page = st.sidebar.radio(
+        "Navigation",
+        [
+            "🏠 HR Overview",
+            "👥 Employees",
+            "📊 Performance",
+            "📅 Attendance",
+            "🎯 Goals",
+            "📝 Leave Records",
+            "📄 Reports",
+        ],
+    )
+
+    if page == "🏠 HR Overview":
+        hr_overview()
+
+    elif page == "👥 Employees":
+        employee_management()
+
+    elif page == "📊 Performance":
+        performance_management()
+
+    elif page == "📅 Attendance":
+        attendance_management()
+
+    elif page == "🎯 Goals":
+        goals_management()
+
+    elif page == "📝 Leave Records":
+        leave_management()
+
+    elif page == "📄 Reports":
+        reports()
+
+
+# ============================================================
+# MAIN
 # ============================================================
 
 def main():
+    validate_database()
 
-    # --------------------------------------------------------
-    # LOGIN
-    # --------------------------------------------------------
-
-    if not st.session_state.get(
-        "auth"
-    ):
-
-        login()
-
+    if not st.session_state.get("authenticated", False):
+        login_screen()
         return
 
+    sidebar()
 
-    # --------------------------------------------------------
-    # SIDEBAR
-    # --------------------------------------------------------
-
-    st.sidebar.title(
-        "👥 HR Workforce Pro"
-    )
-
-
-    st.sidebar.caption(
-        f"Signed in as **{st.session_state.user}**"
-    )
-
-
-    if st.sidebar.button(
-        "Logout",
-        use_container_width=True
-    ):
-
-        st.session_state.clear()
-
-        st.rerun()
-
-
-    # ========================================================
-    # HR ADMIN
-    # ========================================================
-
-    if (
-        st.session_state.role
-        == "HR Admin"
-    ):
-
-        page = st.sidebar.radio(
-            "Navigation",
-            [
-                "🏠 HR Overview",
-                "👥 Employees",
-                "📊 Performance",
-                "📅 Attendance",
-                "🎯 Goals",
-                "📝 Leave Records",
-                "📄 Reports",
-            ]
-        )
-
-
-        if page == "🏠 HR Overview":
-
-            overview()
-
-
-        elif page == "👥 Employees":
-
-            employees()
-
-
-        elif page == "📊 Performance":
-
-            performance_page()
-
-
-        elif page == "📅 Attendance":
-
-            attendance_page()
-
-
-        elif page == "🎯 Goals":
-
-            goals_page()
-
-
-        elif page == "📝 Leave Records":
-
-            leave_page()
-
-
-        elif page == "📄 Reports":
-
-            reports()
-
-
-    # ========================================================
-    # EMPLOYEE
-    # ========================================================
-
+    if st.session_state.role == "HR Admin":
+        admin_dashboard()
     else:
+        employee_self_service()
 
-        page = st.sidebar.radio(
-            "Navigation",
-            [
-                "🏠 My Overview",
-                "📊 My Performance",
-                "📅 My Attendance",
-                "🎯 My Goals",
-                "📄 My Report",
-            ]
-        )
-
-
-        employee_view()
-
-
-        employee_id = (
-            st.session_state.eid
-        )
-
-
-        employee_code = q(
-            """
-            SELECT code
-            FROM employees
-            WHERE id = ?
-            """,
-            (employee_id,),
-            fetch=True
-        )[0]["code"]
-
-
-        if page == "📊 My Performance":
-
-            dataframe = performance()
-
-            dataframe = dataframe[
-                dataframe[
-                    "Employee Code"
-                ]
-                == employee_code
-            ]
-
-            st.dataframe(
-                dataframe,
-                use_container_width=True,
-                hide_index=True
-            )
-
-
-        elif page == "📅 My Attendance":
-
-            dataframe = attendance()
-
-            dataframe = dataframe[
-                dataframe[
-                    "Employee Code"
-                ]
-                == employee_code
-            ]
-
-            st.dataframe(
-                dataframe,
-                use_container_width=True,
-                hide_index=True
-            )
-
-
-        elif page == "🎯 My Goals":
-
-            dataframe = goals()
-
-            dataframe = dataframe[
-                dataframe[
-                    "Employee Code"
-                ]
-                == employee_code
-            ]
-
-            st.dataframe(
-                dataframe,
-                use_container_width=True,
-                hide_index=True
-            )
-
-
-# ============================================================
-# START APPLICATION
-# ============================================================
-
-init()
 
 main()
